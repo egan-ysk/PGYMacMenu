@@ -21,6 +21,12 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 - Xcode Command Line Tools，需包含 `swiftc`、`lipo`、`codesign`
 - 可选：Android SDK build-tools 中的 `aapt`，用于解析完整 APK 元信息
 
+## 下载
+
+普通用户可以从 [GitHub Releases](https://github.com/egan-ysk/PGYMacMenu/releases/latest) 下载最新的 `PGYMacMenu-*-macos-universal.zip`。
+
+下载后解压，将 `PGYMacMenu.app` 拖入 `/Applications`，然后打开应用。首次启动时如遇到 macOS 安全提示，可在系统设置的“隐私与安全性”中允许打开。
+
 ## 构建
 
 ```bash
@@ -41,7 +47,7 @@ dist/PGYMacMenu.app
 - 生成 `.app` Bundle
 - 使用 ad-hoc 签名
 
-## 安装
+## 从源码安装
 
 构建后可以直接运行：
 
