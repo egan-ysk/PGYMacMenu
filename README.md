@@ -14,6 +14,32 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 - APK 元信息解析工具可配置：支持手动指定 `aapt` 或 Android SDK 路径
 - 轻量运行：默认关闭最后一个窗口即退出，可按需开启后台运行和菜单栏图标
 
+## 界面预览
+
+### 菜单栏快捷操作
+
+![菜单栏快捷操作](docs/screenshots/menu-bar-actions.png)
+
+### 主页面
+
+![主页面](docs/screenshots/home-window.png)
+
+### Finder 右键服务
+
+![Finder 右键服务](docs/screenshots/finder-service.png)
+
+### 上传前信息确认
+
+![上传前信息确认](docs/screenshots/upload-window.png)
+
+### API Key 配置
+
+![API Key 配置](docs/screenshots/api-key-settings.png)
+
+### 更新模板配置
+
+![更新模板配置](docs/screenshots/template-settings.png)
+
 ## 运行要求
 
 - macOS Sequoia 15.0+
