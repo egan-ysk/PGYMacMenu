@@ -1,6 +1,6 @@
 # PGYMacMenu
 
-PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上传到蒲公英。项目基于原 `PGYUpload` Android Studio 插件能力重写，采用 Swift + AppKit 实现，支持菜单栏、Finder 右键服务、API Key 配置、更新模板和 APK 元信息解析。
+PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上传到蒲公英。项目采用 Swift + AppKit 实现，支持菜单栏、Finder 右键服务、API Key 配置、更新模板和 APK 元信息解析。
 
 ## 特性
 
