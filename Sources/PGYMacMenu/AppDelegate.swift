@@ -7,7 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case external
     }
 
-    private let store = ConfigurationStore()
+    private let store: ConfigurationStore
+    private let syncCoordinator: SyncCoordinator
     private var statusItem: NSStatusItem?
     private var homeWindowController: HomeWindowController?
     private var apiKeyWindowController: APIKeySettingsWindowController?
@@ -17,6 +18,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var activeResultWindows: [ResultWindowController] = []
     private var pendingOpenURLs: [URL] = []
     private var pendingHomeOpenWorkItem: DispatchWorkItem?
+    private var configurationObserver: NSObjectProtocol?
+    private var terminationReplyPending = false
+
+    override init() {
+        let store = ConfigurationStore()
+        self.store = store
+        syncCoordinator = SyncCoordinator(store: store)
+        super.init()
+    }
+
+    deinit {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -24,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         applyMenuBarPreferences()
+        observeConfigurationChanges()
+        Task { [syncCoordinator] in
+            await syncCoordinator.prepareOnLaunch()
+        }
 
         let arguments = CommandLine.arguments.dropFirst().map(URL.init(fileURLWithPath:))
         let apkArguments = arguments.filter(Self.isAPK)
@@ -63,6 +83,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         !store.loadPreferences().allowMenuBarRunning
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { [syncCoordinator] in
+            await syncCoordinator.applicationDidBecomeActive()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard store.hasPendingSyncChanges() else {
+            return .terminateNow
+        }
+        guard !terminationReplyPending else {
+            return .terminateLater
+        }
+        terminationReplyPending = true
+
+        let flushTask = Task { [syncCoordinator] in
+            await syncCoordinator.flushPendingChanges()
+        }
+        Task { [weak self] in
+            _ = await flushTask.value
+            await MainActor.run {
+                guard self?.terminationReplyPending == true else { return }
+                self?.terminationReplyPending = false
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard self?.terminationReplyPending == true else { return }
+            self?.terminationReplyPending = false
+            flushTask.cancel()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if flag || !activeUploadWindows.isEmpty || !activeResultWindows.isEmpty {
             return true
@@ -77,6 +132,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             configureStatusItem()
         } else {
             removeStatusItem()
+        }
+    }
+
+    private func observeConfigurationChanges() {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .configurationStoreDidChange,
+            object: store,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            self.applyMenuBarPreferences()
+            guard notification.userInfo?["source"] as? String == ConfigurationChangeSource.local.rawValue else {
+                return
+            }
+            Task { [syncCoordinator = self.syncCoordinator] in
+                await syncCoordinator.scheduleLocalChange()
+            }
         }
     }
 
@@ -233,7 +305,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openPreferences() {
-        let controller = preferencesWindowController ?? PreferencesWindowController(store: store) { [weak self] in
+        let controller = preferencesWindowController ?? PreferencesWindowController(
+            store: store,
+            syncCoordinator: syncCoordinator
+        ) { [weak self] in
             self?.applyMenuBarPreferences()
             self?.terminateIfNeededAfterWindowClose()
         }

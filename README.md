@@ -1,6 +1,6 @@
 # PGYMacMenu
 
-PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上传到蒲公英。项目采用 Swift + AppKit 实现，支持菜单栏、Finder 右键服务、API Key 配置、更新模板和 APK 元信息解析。
+PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上传到蒲公英。项目采用 Swift + AppKit 实现，支持菜单栏、Finder 右键服务、API Key 配置、更新模板、APK 元信息解析，以及端到端加密的 WebDAV 配置同步。
 
 ## 特性
 
@@ -11,6 +11,8 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 - 菜单栏入口：可上传 APK、打开配置、管理模板和偏好设置
 - 多 API Key 配置：支持名称、API Key、安装密码、默认更新说明
 - 多更新模板：上传前可快速套用常用发布说明
+- WebDAV 加密同步：在多台 Mac 间双向同步 API 配置、密钥、模板和行为偏好
+- 重装恢复：同一台 Mac 保留 Keychain 时可自动恢复同步连接和远端配置
 - APK 元信息解析工具可配置：支持手动指定 `aapt` 或 Android SDK 路径
 - 轻量运行：默认关闭最后一个窗口即退出，可按需开启后台运行和菜单栏图标
 
@@ -44,7 +46,7 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 
 - macOS Sequoia 15.0+
 - Apple Silicon Mac 或 Intel Mac
-- Xcode Command Line Tools，需包含 `swiftc`、`lipo`、`codesign`
+- Xcode Command Line Tools，需包含 `swiftc`、`lipo`、`sips`、`iconutil`、`codesign`
 - 可选：Android SDK build-tools 中的 `aapt`，用于解析完整 APK 元信息
 
 ## 下载
@@ -52,6 +54,19 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 普通用户可以从 [GitHub Releases](https://github.com/egan-ysk/PGYMacMenu/releases/latest) 下载最新的 `PGYMacMenu-*-macos-universal.zip`。
 
 下载后解压，将 `PGYMacMenu.app` 拖入 `/Applications`，然后打开应用。首次启动时如遇到 macOS 安全提示，可在系统设置的“隐私与安全性”中允许打开。
+
+## 版本更新
+
+### 1.1.0（2026-08-10）
+
+- 新增端到端加密的 WebDAV 双向同步，可同步 API 配置、密钥、更新模板和行为偏好
+- 支持保留 Keychain 时卸载重装自动恢复；通过逐记录合并、删除墓碑和强 ETag 条件写入降低多设备覆盖风险
+- 新增同步连接测试、手动同步、状态展示和退出前刷新；`aapt` 与 Android SDK 路径仍仅保存在本机
+- 新增高清 macOS 应用图标，并在构建时生成完整 `AppIcon.icns` 尺寸集
+- 增加 Swift Package 与 XCTest，覆盖合并、加密、WebDAV、迁移恢复和同步状态机
+- 强化上传临时文件的本机权限与清理策略
+
+历史版本与安装包见 [GitHub Releases](https://github.com/egan-ysk/PGYMacMenu/releases)。
 
 ## 构建
 
@@ -70,6 +85,7 @@ dist/PGYMacMenu.app
 - 校验 `Info.plist`
 - 分别编译 `arm64` 和 `x86_64`
 - 使用 `lipo` 生成 universal 可执行文件
+- 从 `Resources/AppIconSource.png` 生成十种标准尺寸和 `AppIcon.icns`
 - 生成 `.app` Bundle
 - 使用 ad-hoc 签名
 
@@ -129,7 +145,20 @@ open /Applications/PGYMacMenu.app
 
 如果未配置，应用会尝试从 `ANDROID_HOME`、`ANDROID_SDK_ROOT` 和常见 SDK 目录自动查找。
 
-### 4. 上传 APK
+### 4. 配置 WebDAV 同步
+
+进入 `偏好设置...` 的 `同步` 标签页，填写：
+
+- HTTPS WebDAV 根 URL
+- 远端相对文件路径，默认 `PGYMacMenu.sync`
+- WebDAV 用户名和密码
+- 至少 12 个字符的独立同步口令，并再次确认
+
+先点击 `测试连接` 验证读写权限和强 ETag 支持，再保存同步设置。保存后同步自动启用，可使用 `立即同步` 手动触发安全的双向合并。
+
+同步范围包括 API Key 配置及其 API Key/安装密码、更新模板，以及后台运行、菜单栏图标和上传成功后退出这三项行为偏好。`aapt` 和 Android SDK 路径属于设备本地设置，不会同步。
+
+### 5. 上传 APK
 
 上传入口有三种：
 
@@ -149,11 +178,17 @@ open /Applications/PGYMacMenu.app
 
 ## 配置与安全
 
-- API Key 和安装密码保存到 macOS Keychain
-- API Key 名称、默认更新说明、更新模板、偏好设置保存到应用 `UserDefaults`
-- 应用不会在工程目录、日志或构建产物中写入 API Key 和安装密码
+- API Key、安装密码、WebDAV 凭据和同步口令保存在 macOS Keychain
+- 本地配置使用版本化 manifest；敏感字段不会写入明文 `UserDefaults`
+- 远端同步文件使用 PBKDF2-HMAC-SHA256（600,000 次）派生密钥，并以 AES-256-GCM 加密和认证
+- 应用只连接系统信任证书的 HTTPS WebDAV 服务；条件写入要求服务端提供强 ETag
+- 多设备对同一数据集逐记录合并，并保留删除墓碑，避免离线设备恢复已删除项目
+- 应用不会在工程目录或构建产物中写入 API Key、安装密码或同步凭据，应用自身也不会主动记录这些值
 - 上传请求使用 `URLSessionConfiguration.ephemeral`，避免 URLSession 磁盘缓存
-- APK 上传时使用临时 multipart 文件，不把 APK 整体读入内存
+- APK 上传时使用专属 `0700` 临时目录和 `0600` multipart 文件，不把 APK 整体读入内存；完成、失败或检测到崩溃残留时会清理
+- [蒲公英 `buildInfo` 官方接口](https://www.pgyer.com/doc/view/api_upload) 要求通过 HTTPS GET 参数提交 API Key 与 Build Key；应用不会记录完整请求 URL，但这些值仍会按协议发送给蒲公英服务端
+
+同一台 Mac 卸载重装后，如果系统 Keychain 仍保留，应用可自动找回 WebDAV 连接并恢复配置。换新 Mac 或清空 Keychain 后，需要重新输入 WebDAV 信息和原同步口令。同步口令无法找回；丢失后不能解密既有远端备份。
 
 ## 项目结构
 
@@ -161,8 +196,12 @@ open /Applications/PGYMacMenu.app
 Sources/PGYMacMenu/
   AppDelegate.swift                    应用生命周期、菜单栏、Finder 服务、文件入口
   Models.swift                         配置模型、APK 信息、蒲公英响应模型
-  ConfigurationStore.swift             UserDefaults 与 Keychain 配置读写
+  ConfigurationStore.swift             版本化本地配置、迁移与变更事件
   KeychainStore.swift                  Keychain 封装
+  SyncModels.swift                     HLC、版本化同步记录与确定性合并
+  SyncCrypto.swift                     PBKDF2、AES-GCM 信封与内容哈希
+  WebDAVClient.swift                   HTTPS WebDAV、强 ETag 与条件写入
+  SyncCoordinator.swift                双向同步状态机、变更排队与退出刷新
   ApkMetadataReader.swift              APK 元信息解析
   PgyerClient.swift                    蒲公英上传与发布轮询
   HomeWindowController.swift           主页面
@@ -173,8 +212,12 @@ Sources/PGYMacMenu/
   PreferencesWindowController.swift    偏好设置
   UIHelpers.swift                      AppKit UI 工具方法
 Resources/
+  AppIconSource.png                    1024×1024 sRGB 应用图标母版
   Info.plist                           Bundle、UTType、Finder Services 配置
+Tests/PGYMacMenuTests/                 合并、加密、WebDAV 与状态机测试
+Package.swift                          Swift Package 与 XCTest 入口
 scripts/
+  generate_app_icon.swift              可重复生成 1024x1024 sRGB 图标母版
   build_app.sh                         构建脚本
 docs/
   app-design.md                        应用设计文档
@@ -186,17 +229,32 @@ docs/
 项目不依赖第三方库，直接使用系统框架：
 
 - AppKit
+- CommonCrypto
+- CryptoKit
 - Foundation
 - Security
 - UniformTypeIdentifiers
 - CoreImage
 
-构建产物会生成到 `build/` 和 `dist/`，这两个目录默认不纳入 Git 版本控制。
+可运行测试：
+
+```bash
+swift test
+```
+
+构建产物会生成到 `.build/`、`build/` 和 `dist/`，这些目录默认不纳入 Git 版本控制。
+
+需要重新生成应用图标母版时运行：
+
+```bash
+swift scripts/generate_app_icon.swift Resources/AppIconSource.png
+```
 
 ## 文档
 
 - [应用设计文档](docs/app-design.md)
 - [软件使用说明](docs/user-guide.md)
+- [安全策略](SECURITY.md)
 
 ## 开源协议
 

@@ -60,7 +60,7 @@ final class HomeWindowController: NSWindowController {
         buttonGrid.column(at: 1).xPlacement = .fill
         uploadButton.widthAnchor.constraint(equalToConstant: 190).isActive = true
 
-        let hintLabel = NSTextField(wrappingLabelWithString: "菜单栏图标显示为 PGY。关闭此窗口不会退出应用。")
+        let hintLabel = NSTextField(wrappingLabelWithString: "默认关闭最后一个窗口会退出；可在偏好设置中开启后台运行与菜单栏图标。")
         hintLabel.font = .systemFont(ofSize: 12)
         hintLabel.textColor = .tertiaryLabelColor
         hintLabel.alignment = .center

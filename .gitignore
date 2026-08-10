@@ -1,5 +1,10 @@
 .DS_Store
 build/
 dist/
+.build/
+.swiftpm/
+.env
+.env.*
+!.env.example
 *.xcuserstate
 *.swp

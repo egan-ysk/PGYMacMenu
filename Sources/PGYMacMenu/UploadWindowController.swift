@@ -10,6 +10,7 @@ final class UploadWindowController: NSWindowController {
     private var templates: [UpdateTemplate] = []
     private var client: PgyerClient?
     private var uploadTask: Task<Void, Never>?
+    private var configurationObserver: NSObjectProtocol?
 
     private let apiKeyPopup = NSPopUpButton()
     private let templatePopup = NSPopUpButton()
@@ -35,10 +36,17 @@ final class UploadWindowController: NSWindowController {
         window?.styleMask.remove(.resizable)
         buildUI()
         reloadConfiguration()
+        observeConfigurationChanges()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
     }
 
     override func showWindow(_ sender: Any?) {
@@ -309,7 +317,33 @@ final class UploadWindowController: NSWindowController {
         return view
     }
 
-    private func reloadConfiguration() {
+    private func observeConfigurationChanges() {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .configurationStoreDidChange,
+            object: store,
+            queue: .main
+        ) { [weak self] notification in
+            guard Self.includesUploadConfigurationChanges(notification), self?.uploadTask == nil else {
+                return
+            }
+            self?.reloadConfiguration(preservingSelection: true)
+        }
+    }
+
+    private static func includesUploadConfigurationChanges(_ notification: Notification) -> Bool {
+        guard let categories = notification.userInfo?["categories"] as? [String] else {
+            return true
+        }
+        return categories.contains(ConfigurationChangeCategory.apiKeyProfiles.rawValue)
+            || categories.contains(ConfigurationChangeCategory.updateTemplates.rawValue)
+    }
+
+    private func reloadConfiguration(preservingSelection: Bool = false) {
+        let previousProfiles = profiles
+        let selectedProfileID = profiles[safe: apiKeyPopup.indexOfSelectedItem]?.id
+        let selectedTemplateID = templates[safe: templatePopup.indexOfSelectedItem - 1]?.id
+        let currentUpdateInfo = UI.documentTextView(from: updateInfoScrollView).string
+
         profiles = store.loadAPIKeyProfiles()
         templates = store.loadUpdateTemplates()
 
@@ -326,10 +360,43 @@ final class UploadWindowController: NSWindowController {
             templatePopup.addItem(withTitle: template.displayName)
         }
 
-        if let first = profiles.first {
-            UI.documentTextView(from: updateInfoScrollView).string = first.updateTemplate
+        let selectedProfileIndex = selectedProfileID.flatMap { id in
+            profiles.firstIndex(where: { $0.id == id })
         }
-        uploadButton.isEnabled = !profiles.isEmpty
+        let selectedProfileWasDeleted = preservingSelection
+            && selectedProfileID != nil
+            && selectedProfileIndex == nil
+
+        if let selectedProfileIndex {
+            apiKeyPopup.selectItem(at: selectedProfileIndex)
+        } else if preservingSelection && !previousProfiles.isEmpty {
+            apiKeyPopup.select(nil)
+        } else if !profiles.isEmpty {
+            apiKeyPopup.selectItem(at: 0)
+        }
+
+        let selectedTemplateIndex = selectedTemplateID.flatMap { id in
+            templates.firstIndex(where: { $0.id == id })
+        }
+        let selectedTemplateWasDeleted = preservingSelection
+            && selectedTemplateID != nil
+            && selectedTemplateIndex == nil
+        if let selectedTemplateIndex {
+            templatePopup.selectItem(at: selectedTemplateIndex + 1)
+        } else {
+            templatePopup.selectItem(at: 0)
+        }
+
+        let updateInfo: String
+        if selectedProfileWasDeleted || selectedTemplateWasDeleted {
+            updateInfo = ""
+        } else if preservingSelection {
+            updateInfo = currentUpdateInfo
+        } else {
+            updateInfo = profiles.first?.updateTemplate ?? ""
+        }
+        UI.documentTextView(from: updateInfoScrollView).string = updateInfo
+        uploadButton.isEnabled = profiles[safe: apiKeyPopup.indexOfSelectedItem] != nil
     }
 
     @objc private func apiKeyChanged() {
@@ -421,7 +488,17 @@ final class UploadWindowController: NSWindowController {
             guard response == .OK else {
                 return
             }
-            self?.performUpload(profile: profile, updateInfo: updateInfo)
+            guard let self else { return }
+            guard let currentProfile = store.loadAPIKeyProfiles().first(where: { $0.id == profile.id }) else {
+                UI.showAlert(
+                    title: "配置已变更",
+                    message: "所选 API Key 配置已被删除或暂时无法读取，请重新选择后再上传。",
+                    style: .warning,
+                    window: window
+                )
+                return
+            }
+            performUpload(profile: currentProfile, updateInfo: updateInfo)
         }
     }
 

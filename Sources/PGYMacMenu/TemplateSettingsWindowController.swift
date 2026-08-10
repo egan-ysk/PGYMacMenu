@@ -4,6 +4,8 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
     private let store: ConfigurationStore
     private var templates: [UpdateTemplate] = []
     private var editingTemplate = UpdateTemplate()
+    private var configurationObserver: NSObjectProtocol?
+    private var isRefreshingConfiguration = false
 
     private let tableView = NSTableView()
     private let nameField = UI.textField(placeholder: "例如：日常测试包")
@@ -14,10 +16,17 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
         super.init(window: UI.makeWindow(title: "更新模板配置", width: 760, height: 520, minWidth: 680, minHeight: 460))
         buildUI()
         reloadData(select: nil)
+        observeConfigurationChanges()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
     }
 
     override func showWindow(_ sender: Any?) {
@@ -101,16 +110,65 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
     }
 
     private func reloadData(select id: UUID?) {
+        isRefreshingConfiguration = true
+        defer { isRefreshingConfiguration = false }
+
         templates = store.loadUpdateTemplates()
         tableView.reloadData()
         if let id, let index = templates.firstIndex(where: { $0.id == id }) {
             tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            applyTemplateToFields(templates[index])
         } else if !templates.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            applyTemplateToFields(templates[0])
         } else {
+            tableView.deselectAll(nil)
             editingTemplate = UpdateTemplate()
             applyTemplateToFields(editingTemplate)
         }
+    }
+
+    private func observeConfigurationChanges() {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .configurationStoreDidChange,
+            object: store,
+            queue: .main
+        ) { [weak self] notification in
+            guard Self.includesTemplateChanges(notification) else {
+                return
+            }
+            self?.configurationDidChange()
+        }
+    }
+
+    private static func includesTemplateChanges(_ notification: Notification) -> Bool {
+        guard let categories = notification.userInfo?["categories"] as? [String] else {
+            return true
+        }
+        return categories.contains(ConfigurationChangeCategory.updateTemplates.rawValue)
+    }
+
+    private func configurationDidChange() {
+        let selectedID = templates[safe: tableView.selectedRow]?.id
+        guard hasUnsavedDraft else {
+            reloadData(select: selectedID)
+            return
+        }
+
+        isRefreshingConfiguration = true
+        defer { isRefreshingConfiguration = false }
+        templates = store.loadUpdateTemplates()
+        tableView.reloadData()
+        if let selectedID, let index = templates.firstIndex(where: { $0.id == selectedID }) {
+            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        } else {
+            tableView.deselectAll(nil)
+        }
+    }
+
+    private var hasUnsavedDraft: Bool {
+        nameField.stringValue != editingTemplate.name
+            || UI.documentTextView(from: contentScrollView).string != editingTemplate.content
     }
 
     private func applyTemplateToFields(_ template: UpdateTemplate) {
@@ -129,8 +187,12 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
         guard let selected = templates[safe: tableView.selectedRow] else {
             return
         }
-        store.deleteUpdateTemplate(id: selected.id)
-        reloadData(select: nil)
+        do {
+            try store.deleteUpdateTemplate(id: selected.id)
+            reloadData(select: nil)
+        } catch {
+            UI.showAlert(title: "删除失败", message: error.localizedDescription, style: .critical, window: window)
+        }
     }
 
     @objc private func saveTemplate() {
@@ -148,9 +210,13 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
         var template = editingTemplate
         template.name = name
         template.content = content
-        store.saveUpdateTemplate(template)
-        reloadData(select: template.id)
-        UI.showAlert(title: "提示", message: "操作成功", window: window)
+        do {
+            try store.saveUpdateTemplate(template)
+            reloadData(select: template.id)
+            UI.showAlert(title: "提示", message: "操作成功", window: window)
+        } catch {
+            UI.showAlert(title: "保存失败", message: error.localizedDescription, style: .critical, window: window)
+        }
     }
 
     @objc private func closeWindow() {
@@ -181,6 +247,9 @@ final class TemplateSettingsWindowController: NSWindowController, NSTableViewDat
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !isRefreshingConfiguration else {
+            return
+        }
         guard let selected = templates[safe: tableView.selectedRow] else {
             return
         }
