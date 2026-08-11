@@ -3,7 +3,7 @@ import XCTest
 @testable import PGYMacMenu
 
 final class SyncCoordinatorTests: XCTestCase {
-    func testCreateRetryDebounceReinstallRestoreAndMissingRemoteProtection() async throws {
+    func testManualSyncCreatesRetriesRestoresAndProtectsMissingRemote() async throws {
         let namespace = "SyncCoordinatorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
         defaults.removePersistentDomain(forName: namespace)
@@ -43,6 +43,18 @@ final class SyncCoordinatorTests: XCTestCase {
 
         try await coordinator.saveSettings(settings)
 
+        XCTAssertTrue(store.hasPendingSyncChanges())
+        let requestsAfterSave = await transport.requestCount
+        XCTAssertEqual(requestsAfterSave, 0)
+        await coordinator.prepareOnLaunch()
+        await coordinator.applicationDidBecomeActive()
+        await coordinator.scheduleLocalChange()
+        let passiveFlush = await coordinator.flushPendingChanges()
+        let requestsAfterPassiveLifecycle = await transport.requestCount
+        XCTAssertFalse(passiveFlush)
+        XCTAssertEqual(requestsAfterPassiveLifecycle, 0)
+
+        try await coordinator.synchronizeNow()
         XCTAssertFalse(store.hasPendingSyncChanges())
         let initialPutCount = await transport.actualPutCount
         XCTAssertEqual(initialPutCount, 1)
@@ -61,11 +73,17 @@ final class SyncCoordinatorTests: XCTestCase {
         let conditionalAttempts = await transport.actualConditionalPutAttempts
         XCTAssertGreaterThanOrEqual(conditionalAttempts, 2)
 
-        try store.saveUpdateTemplate(UpdateTemplate(name: "Debounced", content: "Automatic"))
+        try store.saveUpdateTemplate(UpdateTemplate(name: "Manual", content: "Explicit only"))
+        let requestCountBeforePassiveLifecycle = await transport.requestCount
         await coordinator.scheduleLocalChange()
-        try await waitUntil(timeoutSeconds: 4) {
-            !store.hasPendingSyncChanges()
-        }
+        await coordinator.applicationDidBecomeActive()
+        let dirtyFlush = await coordinator.flushPendingChanges()
+        let requestCountAfterPassiveLifecycle = await transport.requestCount
+        XCTAssertFalse(dirtyFlush)
+        XCTAssertTrue(store.hasPendingSyncChanges())
+        XCTAssertEqual(requestCountAfterPassiveLifecycle, requestCountBeforePassiveLifecycle)
+
+        try await coordinator.synchronizeNow()
         XCTAssertFalse(store.hasPendingSyncChanges())
 
         defaults.removePersistentDomain(forName: namespace)
@@ -76,8 +94,16 @@ final class SyncCoordinatorTests: XCTestCase {
             clientFactory: factory
         )
 
+        let requestCountBeforeLaunch = await transport.requestCount
         await reinstalledCoordinator.prepareOnLaunch()
 
+        XCTAssertTrue(reinstalledStore.loadAPIKeyProfiles().isEmpty)
+        XCTAssertTrue(reinstalledStore.loadUpdateTemplates().isEmpty)
+        XCTAssertFalse(reinstalledStore.hasPendingSyncChanges())
+        let requestCountAfterLaunch = await transport.requestCount
+        XCTAssertEqual(requestCountAfterLaunch, requestCountBeforeLaunch)
+
+        try await reinstalledCoordinator.synchronizeNow()
         XCTAssertEqual(reinstalledStore.loadAPIKeyProfiles().first?.apiKey, profile.apiKey)
         XCTAssertEqual(reinstalledStore.loadUpdateTemplates().count, 2)
         XCTAssertFalse(reinstalledStore.hasPendingSyncChanges())
@@ -92,16 +118,6 @@ final class SyncCoordinatorTests: XCTestCase {
         let finalPutCount = await transport.actualPutCount
         XCTAssertEqual(finalPutCount, 3)
     }
-
-    private func waitUntil(
-        timeoutSeconds: TimeInterval,
-        condition: @escaping @Sendable () -> Bool
-    ) async throws {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while !condition(), Date() < deadline {
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-    }
 }
 
 private actor StatefulWebDAVTransport: WebDAVTransport {
@@ -114,6 +130,7 @@ private actor StatefulWebDAVTransport: WebDAVTransport {
     private var resources: [URL: Resource] = [:]
     private var etagSequence = 0
     private var conditionalFailuresRemaining = 0
+    private(set) var requestCount = 0
     private(set) var actualPutCount = 0
     private(set) var actualConditionalPutAttempts = 0
 
@@ -122,6 +139,7 @@ private actor StatefulWebDAVTransport: WebDAVTransport {
     }
 
     func send(_ request: URLRequest, maximumResponseBytes: Int) async throws -> WebDAVTransportResponse {
+        requestCount += 1
         let url = try XCTUnwrap(request.url)
         switch request.httpMethod {
         case "MKCOL":
@@ -138,6 +156,7 @@ private actor StatefulWebDAVTransport: WebDAVTransport {
             )
         case "PUT":
             let isActual = url.lastPathComponent == actualFilename
+            let existed = resources[url] != nil
             if request.value(forHTTPHeaderField: "If-None-Match") == "*", resources[url] != nil {
                 return WebDAVTransportResponse(statusCode: 412)
             }
@@ -160,7 +179,7 @@ private actor StatefulWebDAVTransport: WebDAVTransport {
             )
             if isActual { actualPutCount += 1 }
             // Deliberately omit ETag: the client must verify with a following GET.
-            return WebDAVTransportResponse(statusCode: resources[url] == nil ? 201 : 204)
+            return WebDAVTransportResponse(statusCode: existed ? 204 : 201)
         case "DELETE":
             guard let existing = resources[url] else {
                 return WebDAVTransportResponse(statusCode: 404)

@@ -19,7 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var pendingOpenURLs: [URL] = []
     private var pendingHomeOpenWorkItem: DispatchWorkItem?
     private var configurationObserver: NSObjectProtocol?
-    private var terminationReplyPending = false
 
     override init() {
         let store = ConfigurationStore()
@@ -81,41 +80,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !store.loadPreferences().allowMenuBarRunning
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        Task { [syncCoordinator] in
-            await syncCoordinator.applicationDidBecomeActive()
-        }
-    }
-
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard store.hasPendingSyncChanges() else {
-            return .terminateNow
-        }
-        guard !terminationReplyPending else {
-            return .terminateLater
-        }
-        terminationReplyPending = true
-
-        let flushTask = Task { [syncCoordinator] in
-            await syncCoordinator.flushPendingChanges()
-        }
-        Task { [weak self] in
-            _ = await flushTask.value
-            await MainActor.run {
-                guard self?.terminationReplyPending == true else { return }
-                self?.terminationReplyPending = false
-                sender.reply(toApplicationShouldTerminate: true)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard self?.terminationReplyPending == true else { return }
-            self?.terminationReplyPending = false
-            flushTask.cancel()
-            sender.reply(toApplicationShouldTerminate: true)
-        }
-        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

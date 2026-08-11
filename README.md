@@ -12,7 +12,7 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 - 多 API Key 配置：支持名称、API Key、安装密码、默认更新说明
 - 多更新模板：上传前可快速套用常用发布说明
 - WebDAV 加密同步：在多台 Mac 间双向同步 API 配置、密钥、模板和行为偏好
-- 重装恢复：同一台 Mac 保留 Keychain 时可自动恢复同步连接和远端配置
+- 重装恢复：同一台 Mac 保留 Keychain 时可恢复同步连接，点击“立即同步”后恢复远端配置
 - APK 元信息解析工具可配置：支持手动指定 `aapt` 或 Android SDK 路径
 - 轻量运行：默认关闭最后一个窗口即退出，可按需开启后台运行和菜单栏图标
 
@@ -56,6 +56,14 @@ PGYMacMenu 是一个 macOS 原生工具应用，用于选择 Android APK 并上�
 下载后解压，将 `PGYMacMenu.app` 拖入 `/Applications`，然后打开应用。首次启动时如遇到 macOS 安全提示，可在系统设置的“隐私与安全性”中允许打开。
 
 ## 版本更新
+
+### 1.2.0（2026-08-11）
+
+- 同步改为完全手动触发：保存设置、启动、重新激活、本地编辑和退出均不会访问 WebDAV，只有“立即同步”才会传输真实配置
+- 新增不可变加密快照仓库与本机回放锚点，支持多设备分支合并，并在已观察对象被替换或隐藏时停止同步
+- 强化 WebDAV 并发安全：依次验证强 ETag、exclusive `LOCK`、条件创建和同目录 `MOVE` 的 `Overwrite: F` 非覆盖语义，绝不退化为无条件覆盖
+- 改善坚果云及弱 ETag 服务兼容性；目录或安全能力不满足要求时提供可操作错误提示
+- 不可变快照迁移前需升级所有设备；迁移后旧版单文件客户端不再受支持
 
 ### 1.1.0（2026-08-10）
 
@@ -154,7 +162,11 @@ open /Applications/PGYMacMenu.app
 - WebDAV 用户名和密码
 - 至少 12 个字符的独立同步口令，并再次确认
 
-先点击 `测试连接` 验证读写权限和强 ETag 支持，再保存同步设置。保存后同步自动启用，可使用 `立即同步` 手动触发安全的双向合并。
+先点击 `测试连接` 验证读写权限和安全并发能力，再保存同步设置。测试不会读取或修改正式同步文件；如果相对路径包含尚不存在的父目录，会先按填写的路径创建这些目录，再使用不含应用配置和同步口令的临时探针。探针会验证重复 `If-None-Match: *` 创建被拒绝、错误 `If-Match` 不得改写正文；条件创建不安全时，还会验证同目录 `MOVE` 的 `Overwrite: F` 非覆盖语义。应用优先使用通过验证的强 ETag 和 `If-Match` 条件写入；其次是严格验证的标准 WebDAV exclusive `LOCK`/`UNLOCK`；两者都不可用时，在远端文件同级的 `<文件名>.d/` 目录使用不可变加密快照。快照对象通过可靠的条件创建发布；若条件创建不安全，则先写入随机临时对象，再以已验证的同目录 `MOVE` 和 `Overwrite: F` 发布。该移动必须拒绝同名目标且不改写任何对象；应用不允许无条件覆盖已有对象。所有安全机制均未通过时才拒绝同步。
+
+`保存设置` 只把连接信息写入本机 Keychain，不会连接 WebDAV 或上传配置。同步完全由用户控制：只有点击 `立即同步` 才会拉取、逐记录合并并上传；应用启动、重新激活、本地配置变化和退出均不会自动访问 WebDAV。未同步修改会保持“待手动同步”状态，直到下一次手动同步。
+
+坚果云请填写根 URL `https://dav.jianguoyun.com/dav/`，相对文件路径保留 `PGYMacMenu.sync`，用户名使用坚果云注册邮箱，密码使用“第三方应用管理”生成的应用密码；不要把同步文件名或尚未创建的子目录拼进根 URL。兼容性不以单一条件创建为前提，应用会探测可用的安全写入机制，最终以应用内的 `测试连接` 结果为准。参见[坚果云官方 WebDAV 配置说明](https://help.jianguoyun.com/?p=2064)。
 
 同步范围包括 API Key 配置及其 API Key/安装密码、更新模板，以及后台运行、菜单栏图标和上传成功后退出这三项行为偏好。`aapt` 和 Android SDK 路径属于设备本地设置，不会同步。
 
@@ -180,15 +192,18 @@ open /Applications/PGYMacMenu.app
 
 - API Key、安装密码、WebDAV 凭据和同步口令保存在 macOS Keychain
 - 本地配置使用版本化 manifest；敏感字段不会写入明文 `UserDefaults`
-- 远端同步文件使用 PBKDF2-HMAC-SHA256（600,000 次）派生密钥，并以 AES-256-GCM 加密和认证
-- 应用只连接系统信任证书的 HTTPS WebDAV 服务；条件写入要求服务端提供强 ETag
+- 远端同步内容使用 PBKDF2-HMAC-SHA256（600,000 次）派生密钥，并以 AES-256-GCM 加密和认证
+- 应用只连接系统信任证书的 HTTPS WebDAV 服务；并发安全由强 ETag 条件写入、严格验证的 exclusive `LOCK`，或使用条件创建/已验证同目录 `MOVE`（`Overwrite: F`）发布的不可变快照保证，不允许无条件覆盖已有对象
+- 不可变快照仓库使用 `genesis.pgy` 和内容寻址对象，多设备逐记录合并后追加新对象；本机锚点检测回放，并限制对象数量和下载总大小
 - 多设备对同一数据集逐记录合并，并保留删除墓碑，避免离线设备恢复已删除项目
 - 应用不会在工程目录或构建产物中写入 API Key、安装密码或同步凭据，应用自身也不会主动记录这些值
 - 上传请求使用 `URLSessionConfiguration.ephemeral`，避免 URLSession 磁盘缓存
 - APK 上传时使用专属 `0700` 临时目录和 `0600` multipart 文件，不把 APK 整体读入内存；完成、失败或检测到崩溃残留时会清理
 - [蒲公英 `buildInfo` 官方接口](https://www.pgyer.com/doc/view/api_upload) 要求通过 HTTPS GET 参数提交 API Key 与 Build Key；应用不会记录完整请求 URL，但这些值仍会按协议发送给蒲公英服务端
 
-同一台 Mac 卸载重装后，如果系统 Keychain 仍保留，应用可自动找回 WebDAV 连接并恢复配置。换新 Mac 或清空 Keychain 后，需要重新输入 WebDAV 信息和原同步口令。同步口令无法找回；丢失后不能解密既有远端备份。
+同一台 Mac 卸载重装后，如果系统 Keychain 仍保留，应用可自动找回 WebDAV 连接；用户点击 `立即同步` 后恢复远端配置。换新 Mac 或清空 Keychain 后，需要重新输入 WebDAV 信息和原同步口令，再手动同步。同步口令无法找回；丢失后不能解密既有远端备份。
+
+首次启用不可变快照前，应先在所有设备上升级应用。迁移完成后，以前只写单文件的旧构建不再受支持；旧构建继续写入 `PGYMacMenu.sync` 的变更不会被不可变仓库导入。
 
 ## 项目结构
 
@@ -200,8 +215,9 @@ Sources/PGYMacMenu/
   KeychainStore.swift                  Keychain 封装
   SyncModels.swift                     HLC、版本化同步记录与确定性合并
   SyncCrypto.swift                     PBKDF2、AES-GCM 信封与内容哈希
-  WebDAVClient.swift                   HTTPS WebDAV、强 ETag 与条件写入
-  SyncCoordinator.swift                双向同步状态机、变更排队与退出刷新
+  ImmutableSyncSnapshot.swift          不可变加密快照、carrier 引用与内容寻址布局
+  WebDAVClient.swift                   HTTPS WebDAV、条件写入、独占锁与临时探针
+  SyncCoordinator.swift                三路径手动双向同步、合并与回放检测
   ApkMetadataReader.swift              APK 元信息解析
   PgyerClient.swift                    蒲公英上传与发布轮询
   HomeWindowController.swift           主页面

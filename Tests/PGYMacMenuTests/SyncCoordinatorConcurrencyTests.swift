@@ -3,22 +3,13 @@ import XCTest
 @testable import PGYMacMenu
 
 final class SyncCoordinatorConcurrencyTests: XCTestCase {
-    func testSavingNewEndpointCancelsSyncStartedDuringConnectionTest() async throws {
+    func testSavingNewEndpointCancelsInFlightManualSyncWithoutUploadingToNewEndpoint() async throws {
         try await withFixture { fixture in
             let oldSettings = fixture.settings(host: "old.example.com")
             let newSettings = fixture.settings(host: "new.example.com")
             try await fixture.coordinator.saveSettings(oldSettings)
+            try await fixture.coordinator.synchronizeNow()
             try fixture.store.saveUpdateTemplate(UpdateTemplate(name: "Pending", content: "Upload to new endpoint"))
-
-            let probeKey = await fixture.transport.armBlock(
-                host: "new.example.com",
-                method: "GET",
-                resource: .probe
-            )
-            let saveTask = Task {
-                try await fixture.coordinator.saveSettings(newSettings)
-            }
-            await fixture.transport.waitUntilBlocked(probeKey)
 
             let oldDownloadKey = await fixture.transport.armBlock(
                 host: "old.example.com",
@@ -30,7 +21,9 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
             }
             await fixture.transport.waitUntilBlocked(oldDownloadKey)
 
-            await fixture.transport.release(probeKey)
+            let saveTask = Task {
+                try await fixture.coordinator.saveSettings(newSettings)
+            }
             await fixture.transport.waitUntilCancelled(oldDownloadKey)
             await fixture.transport.release(oldDownloadKey)
 
@@ -45,9 +38,12 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
             let oldPutCount = await fixture.transport.actualPutCount(host: "old.example.com")
             let newPutCount = await fixture.transport.actualPutCount(host: "new.example.com")
             XCTAssertEqual(oldPutCount, 1)
-            XCTAssertEqual(newPutCount, 1)
-            XCTAssertFalse(fixture.store.hasPendingSyncChanges())
+            XCTAssertEqual(newPutCount, 0)
+            XCTAssertTrue(fixture.store.hasPendingSyncChanges())
+            let savedSettings = try await fixture.coordinator.savedSettings()
+            XCTAssertEqual(savedSettings?.rootURL, newSettings.rootURL)
 
+            try await fixture.coordinator.synchronizeNow()
             let remoteResource = await fixture.transport.actualResourceData(host: "new.example.com")
             let remoteData = try XCTUnwrap(remoteResource)
             let document = try SyncCrypto.decryptDocument(
@@ -55,8 +51,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
                 passphrase: newSettings.encryptionPassphrase
             )
             XCTAssertEqual(document.updateTemplates.first?.value?.name, "Pending")
-            let savedSettings = try await fixture.coordinator.savedSettings()
-            XCTAssertEqual(savedSettings?.rootURL, newSettings.rootURL)
+            XCTAssertFalse(fixture.store.hasPendingSyncChanges())
         }
     }
 
@@ -64,6 +59,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
         try await withFixture { fixture in
             let settings = fixture.settings(host: "dav.example.com")
             try await fixture.coordinator.saveSettings(settings)
+            try await fixture.coordinator.synchronizeNow()
             try fixture.store.saveUpdateTemplate(UpdateTemplate(name: "Unsynced", content: "Must remain dirty"))
 
             let downloadKey = await fixture.transport.armBlock(
@@ -106,47 +102,21 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
         }
     }
 
-    func testFlushCapturesMutationMadeDuringPostWriteVerification() async throws {
+    func testFlushDoesNotStartNetworkAndLeavesChangesForManualSync() async throws {
         try await withFixture { fixture in
             let settings = fixture.settings(host: "dav.example.com")
             try await fixture.coordinator.saveSettings(settings)
-
-            var template = UpdateTemplate(name: "Release", content: "First revision")
+            let template = UpdateTemplate(name: "Release", content: "Manual revision")
             try fixture.store.saveUpdateTemplate(template)
 
-            let uploadKey = await fixture.transport.armBlock(
-                host: "dav.example.com",
-                method: "PUT",
-                resource: .actual
-            )
-            let syncTask = Task {
-                try await fixture.coordinator.synchronizeNow()
-            }
-            await fixture.transport.waitUntilBlocked(uploadKey)
+            let didFlush = await fixture.coordinator.flushPendingChanges()
+            let putCountAfterFlush = await fixture.transport.actualPutCount(host: "dav.example.com")
+            XCTAssertFalse(didFlush)
+            XCTAssertTrue(fixture.store.hasPendingSyncChanges())
+            XCTAssertEqual(putCountAfterFlush, 0)
 
-            let verificationKey = await fixture.transport.armBlock(
-                host: "dav.example.com",
-                method: "GET",
-                resource: .actual
-            )
-            await fixture.transport.release(uploadKey)
-            await fixture.transport.waitUntilBlocked(verificationKey)
-
-            template.content = "Second revision"
-            try fixture.store.saveUpdateTemplate(template)
-            let flushTask = Task {
-                await fixture.coordinator.flushPendingChanges()
-            }
-
-            await fixture.transport.release(verificationKey)
-            try await syncTask.value
-            let didFlush = await flushTask.value
-            XCTAssertTrue(didFlush)
-
+            try await fixture.coordinator.synchronizeNow()
             XCTAssertFalse(fixture.store.hasPendingSyncChanges())
-            let putCount = await fixture.transport.actualPutCount(host: "dav.example.com")
-            XCTAssertEqual(putCount, 3)
-
             let storedRemoteData = await fixture.transport.actualResourceData(host: "dav.example.com")
             let remoteData = try XCTUnwrap(storedRemoteData)
             let document = try SyncCrypto.decryptDocument(
@@ -155,7 +125,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
             )
             XCTAssertEqual(
                 document.updateTemplates.first(where: { $0.id == template.id })?.value?.content,
-                "Second revision"
+                template.content
             )
         }
     }
@@ -175,7 +145,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
         }
     }
 
-    func testFailedFlushKeepsDirtyStateAndLaterRetrySucceeds() async throws {
+    func testFlushDoesNotConsumeFailureReservedForManualSync() async throws {
         try await withFixture { fixture in
             let settings = fixture.settings(host: "dav.example.com")
             try await fixture.coordinator.saveSettings(settings)
@@ -189,17 +159,22 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
             )
 
             let firstFlush = await fixture.coordinator.flushPendingChanges()
-
+            let secondFlush = await fixture.coordinator.flushPendingChanges()
             XCTAssertFalse(firstFlush)
+            XCTAssertFalse(secondFlush)
             XCTAssertTrue(fixture.store.hasPendingSyncChanges())
-            let failedStatus = await fixture.coordinator.currentStatus()
-            guard case .failed = failedStatus else {
-                return XCTFail("Expected a failed status after the rejected flush")
+            let statusBeforeManualSync = await fixture.coordinator.currentStatus()
+            XCTAssertEqual(statusBeforeManualSync, .pending)
+
+            do {
+                try await fixture.coordinator.synchronizeNow()
+                XCTFail("The reserved WebDAV failure should be consumed by manual sync")
+            } catch let error as WebDAVError {
+                XCTAssertEqual(error, .forbidden)
             }
+            XCTAssertTrue(fixture.store.hasPendingSyncChanges())
 
-            let retryFlush = await fixture.coordinator.flushPendingChanges()
-
-            XCTAssertTrue(retryFlush)
+            try await fixture.coordinator.synchronizeNow()
             XCTAssertFalse(fixture.store.hasPendingSyncChanges())
             let remoteData = await fixture.transport.actualResourceData(host: "dav.example.com")
             let document = try SyncCrypto.decryptDocument(
@@ -217,6 +192,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
         try await withFixture { fixture in
             let settings = fixture.settings(host: "dav.example.com")
             try await fixture.coordinator.saveSettings(settings)
+            try await fixture.coordinator.synchronizeNow()
             let firstResource = await fixture.transport.actualResourceData(host: "dav.example.com")
             let firstGeneration = try XCTUnwrap(firstResource)
 
@@ -229,14 +205,15 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
                 data: firstGeneration
             )
 
+            try await fixture.coordinator.saveSettings(settings)
             do {
-                try await fixture.coordinator.saveSettings(settings)
+                try await fixture.coordinator.synchronizeNow()
                 XCTFail("A replayed generation must be rejected after removing and re-entering settings")
             } catch let error as SyncCoordinatorError {
                 XCTAssertEqual(error, .rollbackDetected)
             }
             let savedSettings = try await fixture.coordinator.savedSettings()
-            XCTAssertNil(savedSettings)
+            XCTAssertEqual(savedSettings?.rootURL, settings.rootURL)
         }
     }
 
@@ -245,6 +222,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
             let firstSettings = fixture.settings(host: "first.example.com")
             let secondSettings = fixture.settings(host: "second.example.com")
             try await fixture.coordinator.saveSettings(firstSettings)
+            try await fixture.coordinator.synchronizeNow()
             let firstResource = await fixture.transport.actualResourceData(host: "first.example.com")
             let firstGeneration = try XCTUnwrap(firstResource)
 
@@ -256,19 +234,20 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
                 host: "first.example.com",
                 data: firstGeneration
             )
+            try await fixture.coordinator.saveSettings(firstSettings)
             do {
-                try await fixture.coordinator.saveSettings(firstSettings)
+                try await fixture.coordinator.synchronizeNow()
                 XCTFail("Switching endpoints must not discard the first endpoint's replay anchor")
             } catch let error as SyncCoordinatorError {
                 XCTAssertEqual(error, .rollbackDetected)
             }
             let settingsAfterReplay = try await fixture.coordinator.savedSettings()
-            XCTAssertEqual(settingsAfterReplay?.rootURL, secondSettings.rootURL)
+            XCTAssertEqual(settingsAfterReplay?.rootURL, firstSettings.rootURL)
 
             let firstPutCount = await fixture.transport.actualPutCount(host: "first.example.com")
             await fixture.transport.removeActualResource(host: "first.example.com")
             do {
-                try await fixture.coordinator.saveSettings(firstSettings)
+                try await fixture.coordinator.synchronizeNow()
                 XCTFail("A missing previously observed file must not be recreated after switching endpoints")
             } catch let error as SyncCoordinatorError {
                 XCTAssertEqual(error, .remoteFileDisappeared)
@@ -282,6 +261,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
         try await withFixture { fixture in
             let settings = fixture.settings(host: "dav.example.com")
             try await fixture.coordinator.saveSettings(settings)
+            try await fixture.coordinator.synchronizeNow()
             let resourceData = await fixture.transport.actualResourceData(host: "dav.example.com")
             let resource = try XCTUnwrap(resourceData)
             let document = try SyncCrypto.decryptDocument(
@@ -303,7 +283,7 @@ final class SyncCoordinatorConcurrencyTests: XCTestCase {
                 accessibility: .afterFirstUnlockThisDeviceOnly
             )
 
-            try await fixture.coordinator.testConnection(settings)
+            try await fixture.coordinator.synchronizeNow()
 
             XCTAssertNil(try fixture.syncKeychain.readData(account: "webdav.anchor.v1"))
             let migratedData = try XCTUnwrap(

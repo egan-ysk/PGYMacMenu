@@ -44,8 +44,9 @@ PGYMacMenu 是面向蒲公英 APK 发布流程的 macOS 原生轻量工具。应
 - `KeychainStore.swift`：分代 Keychain 密钥包、同步 bootstrap 和设备锚点
 - `SyncModels.swift`：HLC revision、版本化记录、删除墓碑与确定性合并
 - `SyncCrypto.swift`：PBKDF2-HMAC-SHA256、AES-GCM 信封和内容哈希
-- `WebDAVClient.swift`：HTTPS WebDAV、强 ETag、条件写入、目录创建和连接测试
-- `SyncCoordinator.swift`：串行双向同步、变更排队、生命周期触发和状态发布
+- `ImmutableSyncSnapshot.swift`：不可变加密快照、carrier 引用与内容寻址布局
+- `WebDAVClient.swift`：HTTPS WebDAV、条件写入、独占锁、目录枚举和临时探针
+- `SyncCoordinator.swift`：三路径串行手动同步、待上传状态、合并与回放检测
 - `ApkMetadataReader.swift`：调用 `aapt dump badging` 解析 APK 元信息
 - `PgyerClient.swift`：蒲公英 Token 获取、COS 上传、发布结果轮询
 - `APIKeySettingsWindowController.swift`：API Key 配置窗口
@@ -91,22 +92,25 @@ PGYMacMenu 是面向蒲公英 APK 发布流程的 macOS 原生轻量工具。应
 
 - 客户端只接受系统信任证书的 HTTPS 根 URL，拒绝 HTTP、跨域或 HTTPS 降级重定向
 - 使用无缓存、无 Cookie、无共享凭据存储的 ephemeral `URLSession`
-- 首次创建以 `If-None-Match: *` 条件 PUT；更新使用最近 GET 返回的强 ETag 和 `If-Match`
-- 遇到 `412 Precondition Failed` 时重新拉取、解密、合并并最多重试三轮
-- 弱 ETag 或缺少 ETag 时停止上传，不退化为无条件 PUT
+- 强 ETag 路径：单文件首次创建使用 `If-None-Match: *`，更新使用最近 GET 返回的强 ETag 和 `If-Match`；遇到 `412 Precondition Failed` 时重新拉取、解密、合并并最多重试三轮
+- exclusive `LOCK` 路径：弱 ETag 或缺少 ETag 时，只有严格验证标准 WebDAV exclusive `LOCK`/`UNLOCK` 后，才用锁令牌保护 GET、合并、PUT 和写后验证
+- 不可变快照路径：前两种机制不可用时，在原远端文件同级的 `<文件名>.d/` 目录保存 `genesis.pgy` 和以密文 SHA-256 命名的 `.pgy` 对象；对象优先用通过安全验证的 `If-None-Match: *` 创建。若条件创建不安全，则先写入随机临时对象，再以通过验证的同目录 WebDAV `MOVE` 和 `Overwrite: F` 发布；目标已存在必须拒绝移动且两端内容不变，不允许无条件覆盖已有对象
+- 不可变快照包含完整加密状态和已验证的父 carrier 引用；客户端校验数据集、哈希、父链和本机锚点，合并所有有效分支后追加后继对象，从而保留多设备并发修改并检测已观察历史的回放
+- 不可变仓库最多接受 512 个对象、单次最多下载 64 MiB；超限、缺失 carrier、图结构异常或锚点回退均停止同步
+- 三种安全机制均不可用时停止上传，不退化为无条件 PUT
 - 嵌套远端路径缺少父目录时逐级 `MKCOL`
 - 上传后必须重新 GET、解密并核对 generation 和内容哈希，确认成功后才清除 dirty 状态
 - 已见过远端数据集后突然收到 `404`、检测到 generation 回退或前驱哈希异常时停止写入
 
-连接测试通过独立临时文件执行 PUT、GET 和 DELETE，并验证强 ETag。测试文件不包含应用配置或同步口令。
+连接测试不读取或修改单文件配置、`genesis.pgy` 或任何真实快照。嵌套相对路径缺少父目录时会先按配置执行 `MKCOL`；随后只使用独立临时探针执行 PUT、GET、冲突写入、`MOVE` 和 DELETE。探针要求重复 `If-None-Match: *` 创建返回 `412` 且正文不变；强 ETag 路径还要求错误 `If-Match` 返回 `412`、正确 `If-Match` 更新成功。否则严格探测 exclusive `LOCK`；不可变创建则在随机临时目录中验证同目录 `MOVE` 携带 `Overwrite: F`：先暂存随机对象，首次移动后确认内容与源文件删除，再以另一随机对象冲突移动并确认目标和来源均未被改写。所有安全机制均未通过时才报告不支持安全并发同步。只有“立即同步”会拉取或上传真实配置。
 
 ### 5.5 协调器与生命周期
 
-`SyncCoordinator` actor 保证 single-flight，同一时刻只有一次状态转换或 WebDAV 写入。配置保存和删除产生本地变更后等待 1 秒合并连续操作；同步过程中再次发生的变更会保留 dirty 标记，并在当前轮次结束后继续处理。
+`SyncCoordinator` actor 保证 single-flight，同一时刻只有一次手动同步或 WebDAV 写入。配置保存和删除只设置 dirty 与“待手动同步”状态；同步过程中再次发生的本地变更会继续保留 dirty 标记，由当前手动同步重试或留待用户下次手动同步。
 
-远端检查发生在应用启动、重新激活、本地变更触发和用户点击“立即同步”时，不做定时轮询。应用退出时通过延迟终止最多等待约 5 秒刷新待上传内容；失败继续保留 dirty 状态，在下次启动重试。
+只有用户点击“立即同步”才会读取或写入远端配置。保存 WebDAV 设置、应用启动、重新激活和本地变更通知只更新或读取本机状态，不创建网络请求；退出时不执行同步或 flush，也不延迟等待上传。失败或尚未上传的修改继续保留 dirty 状态，直到后续手动同步成功。
 
-偏好设置使用原生“通用 / 同步”标签页。同步页包含连接字段、口令确认、测试连接、保存设置、立即同步、移除配置和状态；保存完整设置后自动启用，不增加独立开关。移除配置只删除本机连接信息并停止同步，不删除远端备份。
+偏好设置使用原生“通用 / 同步”标签页。同步页包含连接字段、口令确认、测试连接、保存设置、立即同步、移除配置和状态；保存设置只持久化本机连接信息，不隐式执行连接测试或同步。移除配置只删除本机连接信息，不删除远端备份和本机回放锚点。
 
 ## 6. 上传流程
 
@@ -197,12 +201,14 @@ Swift Package 仅作为可重复执行的测试入口，正式 `.app` 仍由脚�
 swift test
 ```
 
-测试覆盖 HLC 与逐记录合并、墓碑和顺序、偏好约束、PBKDF2/AES-GCM 往返与篡改、WebDAV 条件写入和 ETag、同步状态机、旧数据迁移与恢复边界。发布前还需检查 universal 架构、plist、十种 iconset 尺寸和严格 codesign。
+测试覆盖 HLC 与逐记录合并、墓碑和顺序、偏好约束、PBKDF2/AES-GCM 往返与篡改、WebDAV 条件写入、ETag、独占锁和不可变快照安全探测、手动同步网络边界、旧数据迁移与恢复边界。发布前还需检查 universal 架构、plist、十种 iconset 尺寸和严格 codesign。
 
 ## 12. 恢复与安全边界
 
-- 同一台 Mac 保留 Keychain 时，卸载重装可自动恢复 WebDAV bootstrap 并拉取远端配置
+- 同一台 Mac 保留 Keychain 时，卸载重装可恢复 WebDAV bootstrap；用户点击“立即同步”后拉取远端配置
 - 换机或清空 Keychain 后，用户必须重新输入 WebDAV 信息和原同步口令
 - 忘记同步口令后无法解密远端备份，v1 不提供找回或静默重置
-- 本机保存的 dataset/generation/hash 锚点能检测已观察过的旧快照回放；全新设备无法证明服务器是否回放旧的合法密文
+- 单文件锚点可检测 dataset 替换、同代篡改、generation 降低和相邻代前驱异常；单文件不保留中间版本，因此无法证明跨多代跳跃一定沿当前锚点演进
+- 不可变仓库锚点会固定 genesis、已接受 carrier 和已观察对象清单，可在本机检测这些远端对象被替换或隐藏；全新设备仍无法证明服务器是否回放旧的合法密文
+- 首次迁移到不可变仓库前必须升级所有设备；迁移后旧构建继续写入单文件的变更不会被不可变仓库导入
 - 本版本不使用 iCloud、CloudKit、App Sandbox entitlement、Developer ID 或 Mac App Store 分发迁移

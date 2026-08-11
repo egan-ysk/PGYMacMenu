@@ -12,7 +12,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     private let quitAfterUploadCheckbox = NSButton(checkboxWithTitle: "上传成功后自动退出应用", target: nil, action: nil)
 
     private let rootURLField = UI.textField(placeholder: "https://dav.example.com/remote.php/dav/files/user/")
-    private let relativePathField = UI.textField(placeholder: "PGYMacMenu.sync")
+    private let relativePathField = UI.textField(placeholder: WebDAVConfiguration.defaultRelativePath)
     private let usernameField = UI.textField(placeholder: "WebDAV 用户名")
     private let webDAVPasswordField = UI.secureField(placeholder: "WebDAV 密码或应用专用密码")
     private let passphraseField = UI.secureField(placeholder: "至少 12 个字符")
@@ -232,7 +232,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     }
 
     private func configureSyncFields() {
-        relativePathField.stringValue = "PGYMacMenu.sync"
+        relativePathField.stringValue = WebDAVConfiguration.defaultRelativePath
         [
             rootURLField,
             relativePathField,
@@ -336,7 +336,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
         defer { isApplyingSavedSettings = false }
         hasSavedSyncSettings = settings != nil
         rootURLField.stringValue = settings?.rootURL ?? ""
-        relativePathField.stringValue = settings?.relativePath ?? "PGYMacMenu.sync"
+        relativePathField.stringValue = settings?.relativePath ?? WebDAVConfiguration.defaultRelativePath
         usernameField.stringValue = settings?.username ?? ""
         webDAVPasswordField.stringValue = settings?.webDAVPassword ?? ""
         passphraseField.stringValue = settings?.encryptionPassphrase ?? ""
@@ -352,7 +352,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             statusLabel.stringValue = "未配置"
             statusLabel.textColor = .secondaryLabelColor
         case .pending:
-            statusLabel.stringValue = "等待上传"
+            statusLabel.stringValue = "待手动同步"
             statusLabel.textColor = .systemOrange
         case .syncing:
             statusLabel.stringValue = "同步中..."
@@ -491,7 +491,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
             guard let self else { return }
             do {
                 try await syncCoordinator.testConnection(settings)
-                finishSyncAction(successMessage: "连接测试通过，服务器支持安全并发同步。")
+                finishSyncAction(successMessage: "连接测试通过，可以手动同步。")
             } catch {
                 finishSyncAction(successMessage: nil, error: error)
             }
@@ -509,7 +509,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
                 hasSyncDraft = false
                 applySavedSettings(try await syncCoordinator.savedSettings())
                 applySyncStatus(await syncCoordinator.currentStatus())
-                finishSyncAction(successMessage: "同步设置已保存，并已完成一次安全双向同步。")
+                finishSyncAction(successMessage: "同步设置已保存。点击“立即同步”后才会连接远端。")
             } catch {
                 hasSavedSyncSettings = (try? await syncCoordinator.savedSettings()) != nil
                 applySyncStatus(await syncCoordinator.currentStatus())
